@@ -34,9 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Registro de routers modulares (soporta tanto /v1/metrics como /api/v1/metrics)
+# Registro de routers modulares (soporta /v1/metrics, /api/v1/metrics y /api/analytics)
 app.include_router(metrics_router, prefix="/v1/metrics")
 app.include_router(metrics_router, prefix="/api/v1/metrics")
+app.include_router(metrics_router, prefix="/api/analytics")
 
 
 @app.get("/health", tags=["Health Check"])

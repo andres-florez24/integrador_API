@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 import requests
 from requests.exceptions import RequestException
 
-from api.services.kpi_calculator import calcular_top_empresas
+from api.services.kpi_calculator import calcular_top_empresas, calcular_resumen_landing
 from etl.generator import generar_empresas, generar_retos
 from etl.seeder import obtener_token
 
@@ -119,3 +119,22 @@ def get_top_companies(
         total_empresas_evaluadas=len(metric_items),
         data=metric_items,
     )
+
+
+@router.get(
+    "/resumen",
+    summary="Resumen estadístico de retos por categoría y estado para la Landing Page",
+)
+def get_analytics_resumen() -> Dict[str, Any]:
+    """
+    Endpoint consumido por `LandingAnalyticsSection.jsx` en la Landing Page pública.
+    Retorna conteos por categoría académica (BarChart) y distribución por estado (PieChart).
+    """
+    retos_raw, empresas_raw, fuente = _obtener_datos_frescos()
+    resumen = calcular_resumen_landing(retos_raw=retos_raw, empresas_raw=empresas_raw)
+    return {
+        "kpi": "resumen_ecosistema_landing",
+        "fuente_datos": fuente,
+        "generado_en": datetime.now(timezone.utc).isoformat(),
+        **resumen,
+    }
