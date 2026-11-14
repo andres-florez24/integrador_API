@@ -5,14 +5,12 @@ Rutas analíticas para exponer KPIs y métricas reales calculadas con Pandas hac
 from datetime import datetime, timezone
 import os
 from typing import Any, Dict, List, Optional, Tuple
-import uuid
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 import requests
 from requests.exceptions import RequestException
 
 from api.services.kpi_calculator import calcular_top_empresas, calcular_resumen_landing
-from etl.generator import generar_empresas, generar_retos
 from etl.seeder import obtener_token
 
 router = APIRouter(
@@ -52,40 +50,77 @@ class TopCompaniesResponse(BaseModel):
 
 def _obtener_datos_frescos() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
     """
-    Intenta consultar en vivo los endpoints `/api/empresas` y `/api/retos` de Spring Boot (Puerto 8080).
-    Si el backend no está disponible o aún no tiene retos sembrados, genera un lote sintético
-    en memoria con Faker para garantizar que el cálculo de Pandas siempre pueda probarse.
+    Consulta en vivo los endpoints `/api/empresas` y `/api/retos` de Spring Boot (Puerto 8080).
+    Desactiva el fallback sintético de Faker: si la autenticación o la petición HTTP falla,
+    imprime la causa real en consola y lanza HTTPException 502 Bad Gateway.
     """
     try:
         token = obtener_token(ADMIN_EMAIL, ADMIN_PASSWORD)
-        if token:
-            with requests.Session() as session:
-                session.headers.update(
-                    {
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    }
+        if not token:
+            msg_auth = (
+                f"Fallo de autenticación contra {SPRING_BASE_URL}/api/v1/auth/login "
+                f"con el usuario '{ADMIN_EMAIL}'."
+            )
+            print(f"[ERROR Analytics -> Spring Boot] {msg_auth}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Error de conexión con el Backend Core: {msg_auth}",
+            )
+
+        with requests.Session() as session:
+            session.headers.update(
+                {
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                }
+            )
+            resp_empresas = session.get(f"{SPRING_BASE_URL}/api/empresas", timeout=5)
+            resp_retos = session.get(f"{SPRING_BASE_URL}/api/retos", timeout=5)
+
+            if not resp_empresas.ok:
+                msg_emp = (
+                    f"GET /api/empresas respondió HTTP {resp_empresas.status_code}: "
+                    f"{resp_empresas.text}"
                 )
-                resp_empresas = session.get(f"{SPRING_BASE_URL}/api/empresas", timeout=5)
-                resp_retos = session.get(f"{SPRING_BASE_URL}/api/retos", timeout=5)
+                print(f"[ERROR Analytics -> Spring Boot] {msg_emp}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Error de conexión con el Backend Core ({msg_emp})",
+                )
 
-                if resp_empresas.ok and resp_retos.ok:
-                    empresas_bd: List[Dict[str, Any]] = resp_empresas.json()
-                    retos_bd: List[Dict[str, Any]] = resp_retos.json()
-                    if empresas_bd and retos_bd:
-                        return retos_bd, empresas_bd, "spring_boot_live"
-    except RequestException:
-        pass
+            if not resp_retos.ok:
+                msg_ret = (
+                    f"GET /api/retos respondió HTTP {resp_retos.status_code}: "
+                    f"{resp_retos.text}"
+                )
+                print(f"[ERROR Analytics -> Spring Boot] {msg_ret}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Error de conexión con el Backend Core ({msg_ret})",
+                )
 
-    # Fallback: Simulación fresca en memoria si Spring Boot está apagado o vacío
-    empresas_simuladas: List[Dict[str, Any]] = [
-        {"id": str(uuid.uuid4()), **emp} for emp in generar_empresas(8)
-    ]
-    retos_simulados: List[Dict[str, Any]] = [
-        {"id": str(uuid.uuid4()), **reto}
-        for reto in generar_retos(35, empresas_simuladas)
-    ]
-    return retos_simulados, empresas_simuladas, "synthetic_simulation"
+            empresas_bd: List[Dict[str, Any]] = resp_empresas.json()
+            retos_bd: List[Dict[str, Any]] = resp_retos.json()
+
+            return retos_bd, empresas_bd, "spring_boot_live"
+
+    except HTTPException:
+        raise
+    except RequestException as exc:
+        print(
+            f"[ERROR CRÍTICO Analytics -> Spring Boot] No se pudo conectar a "
+            f"{SPRING_BASE_URL}: {exc}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error de conexión con el Backend Core en {SPRING_BASE_URL}: {exc}",
+        ) from exc
+    except Exception as exc:
+        print(f"[ERROR INESPERADO Analytics] {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error inesperado al procesar datos del Backend Core: {exc}",
+        ) from exc
 
 
 @router.get(
